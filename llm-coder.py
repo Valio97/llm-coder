@@ -1,17 +1,18 @@
 import configparser
 import os
 import tkinter as tk
-from tkinter import ttk
+import re
+from datetime import datetime
 from tkinter import filedialog, messagebox
+from tkinter import ttk
 
-from langchain.chains.question_answering import load_qa_chain
 from langchain_community.vectorstores import FAISS
 from langchain_openai import ChatOpenAI
 from langchain_openai import OpenAIEmbeddings
 
 from file_utils import FileUtils
-from results_saver import ResultsSaver
 from messages import Messages
+from results_saver import ResultsSaver
 
 # The API key is read from the environment variable OPENAI_API_KEY
 api_key = os.getenv('OPENAI_API_KEY')
@@ -34,7 +35,6 @@ def get_concept_description(concept):
 def construct_prompt(messages):
     # Combine the parts into the final prompt
     prompt = (f"{messages.system_message}\n{messages.user_message}\n "
-              f"The concept '{messages.concept}' is described as follows: {get_concept_description(messages.concept)}\n"
               f"Please provide the output in the following format: \n{messages.output_format}")
 
     if messages.explanations:
@@ -57,66 +57,87 @@ def refactor_documents(documents):
     return '\n'.join(page_contents)
 
 
-def semi_automated_coding(messages, vector_store, save_path, threshold):
+def semi_automated_coding(messages, files_array, save_path, threshold, max_chunks, result_format, chunk_size):
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    embeddings = OpenAIEmbeddings()
     threshold_value = float(threshold)
-    results_with_scores = vector_store.similarity_search_with_relevance_scores(
-        get_concept_description(messages.concept),
-        k=100,
-        threshold=threshold_value)
-    filtered_results = [(doc, score) for doc, score in results_with_scores if score >= threshold_value]
+    combined_text = ''
 
-    ResultsSaver.save_results_relevant_chunks(messages, filtered_results, save_path)
+    for single_file in files_array:
+        raw_text = ''
+        if single_file.endswith('.txt'):
+            with open(single_file, "r", encoding='utf-8', errors='replace') as file:
+                raw_text = file.read()
+                raw_text = clean_non_utf_characters(raw_text)
+        elif single_file.endswith('.pdf'):
+            raw_text = FileUtils.extract_text_from_pdf_file(single_file)
+        text_chunks = FileUtils.split_text(raw_text, chunk_size)
+        vector_store = FAISS.from_texts(text_chunks, embeddings)
+        results_with_scores = vector_store.similarity_search_with_relevance_scores(
+            get_concept_description(messages.concept),
+            k=max_chunks,
+            threshold=threshold_value)
+        filtered_results = [(doc, score) for doc, score in results_with_scores if score >= threshold_value]
+
+        if result_format == "txt":
+            ResultsSaver.save_results_relevant_chunks_in_txt_file(messages, single_file, filtered_results, save_path,
+                                                                  timestamp)
+        elif result_format == "csv":
+            ResultsSaver.save_results_relevant_chunks_in_csv_file(messages, single_file, filtered_results, save_path,
+                                                                  timestamp)
+    # Create text chunks
+
+    # Get the OpenAI embeddings. This object also uses the OPENAI_API_KEY
+    # A request is sent to OpenAI to get the embeddings.
 
 
-def main(file, save_path, tool_mode, messages, threshold):
+def main(file_path, save_path, tool_mode, messages, threshold, max_chunks, result_format, chunk_size):
     if not api_key:
         print("OPENAI_API_KEY environment variable is not set.")
         return
 
-    if not os.path.isfile(file):
-        print("Not a valid path")
-        return
-
-    if not FileUtils.is_pdf_file(file):
-        print("The file is not a PDF!")
-        return
-
-    # Get the text from the pdf
-    raw_text = FileUtils.extract_text_from_file(file)
-
-    # Create text chunks
-    text_chunks = FileUtils.split_text(raw_text)
-
-    # Get the OpenAI embeddings. This object also uses the OPENAI_API_KEY
-    # A request is sent to OpenAI to get the embeddings.
-    embeddings = OpenAIEmbeddings()
-    vector_store = FAISS.from_texts(text_chunks, embeddings)
+    files_array = file_path.split(", ")
 
     if tool_mode == '1':
-        fully_automated_coding(messages, vector_store, file, save_path)
+        fully_automated_coding(messages, files_array, save_path)
     else:
-        semi_automated_coding(messages, vector_store, save_path, threshold)
+        semi_automated_coding(messages, files_array, save_path, threshold, max_chunks, result_format, chunk_size)
 
 
-def fully_automated_coding(messages, vector_store, file, save_path):
+def clean_non_utf_characters(text):
+    # Replace common issues with appropriate characters
+    text = re.sub(r'â€¦', '...', text)  # Replace problematic ellipses
+    text = re.sub(r'â€œ|â€\x9c', '"', text)  # Replace open quotes
+    text = re.sub(r'â€\x9d|â€\x9d', '"', text)  # Replace close quotes
+    text = re.sub(r'â€™', "'", text)  # Replace apostrophes
+    text = re.sub(r'â€“|â€”', '-', text)  # Replace dashes
+    return text
+
+
+def fully_automated_coding(messages, files_array, save_path):
     # Prepare the LLM and the Q&A chain
     llm = ChatOpenAI(temperature=0.0, model_name="gpt-4o")
-    chain = load_qa_chain(llm, chain_type="stuff")
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    # Call the function to construct the prompt
-    prompt = construct_prompt(messages)
+    for single_file in files_array:
+        prompt = construct_prompt(messages)
+        raw_text = ''
+        if single_file.endswith('.txt'):
+            with open(single_file, "r", encoding='utf-8', errors='replace') as file:
+                raw_text = file.read()
+                raw_text = clean_non_utf_characters(raw_text)
+        elif single_file.endswith('.pdf'):
+            raw_text = FileUtils.extract_text_from_pdf_file(file)
 
-    # Retrieve the "k" most similar chunks
-    documents = vector_store.similarity_search(prompt, k=40)
+        prompt = f"{prompt}\nHere is the text for your analysis:{raw_text}"
+        print(prompt)
 
-    prompt = f"{prompt}\n'Here are the relevant chunks from the text:'{refactor_documents(documents)}"
-    print(prompt)
+        # Send the request and get a response
+        response = llm.invoke(prompt)
 
-    # Send the request and get a response
-    response = chain.invoke({"question": prompt, "input_documents": documents})
-
-    result_saver = ResultsSaver(file, save_path, response.get("output_text"), messages.concept)
-    result_saver.save_results_fully_automated()
+        print("got the response!!!!")
+        result_saver = ResultsSaver(single_file, save_path, response.content, messages.concept)
+        result_saver.save_results_fully_automated(timestamp)
 
 
 def read_concepts():
@@ -198,6 +219,51 @@ def get_output_format():
         return "Error: Unable to retrieve system message."
 
 
+def get_result_format():
+    # Load the .ini file
+    config = configparser.ConfigParser()
+
+    config.read("prompt_config.ini")
+
+    # Get the system_message value
+    try:
+        result_format = config.get('Other', 'result_format')
+        return result_format
+    except (configparser.NoSectionError, configparser.NoOptionError) as e:
+        # Handle missing section or option
+        return "Error: Unable to retrieve system message."
+
+
+def get_max_chunks():
+    # Load the .ini file
+    config = configparser.ConfigParser()
+
+    config.read("prompt_config.ini")
+
+    # Get the system_message value
+    try:
+        max_chunks = config.get('Other', 'max_chunks')
+        return int(max_chunks)
+    except (configparser.NoSectionError, configparser.NoOptionError) as e:
+        # Handle missing section or option
+        return "Error: Unable to retrieve system message."
+
+
+def get_chunk_size():
+    # Load the .ini file
+    config = configparser.ConfigParser()
+
+    config.read("prompt_config.ini")
+
+    # Get the system_message value
+    try:
+        chunk_size = config.get('Other', 'chunk_size')
+        return int(chunk_size)
+    except (configparser.NoSectionError, configparser.NoOptionError) as e:
+        # Handle missing section or option
+        return "Error: Unable to retrieve system message."
+
+
 def save_new_messages(system_message, user_message, output_format):
     # Load the .ini file
     config = configparser.ConfigParser()
@@ -252,8 +318,67 @@ def save_threshold(threshold):
     print("Threshold updated successfully.")
 
 
+def save_chunk_size(chunk_size):
+    config = configparser.ConfigParser()
+
+    config.read("prompt_config.ini")
+
+    if not config.has_section('Other'):  # Replace 'SectionName' with your actual section name
+        config.add_section('Other')  # Create the section if it doesn't exist
+
+        # Replace the old message with the new one
+    config.set('Other', 'chunk_size', chunk_size)
+
+    # Write changes to the .ini file
+    with open('prompt_config.ini', 'w') as configfile:  # Replace with your actual .ini file name
+        config.write(configfile)
+
+    print("Chunk size updated successfully.")
+
+
+def save_result_format(result_format):
+    config = configparser.ConfigParser()
+
+    config.read("prompt_config.ini")
+
+    if not config.has_section('Other'):  # Replace 'SectionName' with your actual section name
+        config.add_section('Other')  # Create the section if it doesn't exist
+
+        # Replace the old message with the new one
+    config.set('Other', 'result_format', result_format)
+
+    # Write changes to the .ini file
+    with open('prompt_config.ini', 'w') as configfile:  # Replace with your actual .ini file name
+        config.write(configfile)
+
+    print("Result format updated successfully.")
+
+
+def save_max_chunks(max_chunks):
+    config = configparser.ConfigParser()
+
+    config.read("prompt_config.ini")
+
+    if not config.has_section('Other'):  # Replace 'SectionName' with your actual section name
+        config.add_section('Other')  # Create the section if it doesn't exist
+
+        # Replace the old message with the new one
+    config.set('Other', 'max_chunks', max_chunks)
+
+    # Write changes to the .ini file
+    with open('prompt_config.ini', 'w') as configfile:  # Replace with your actual .ini file name
+        config.write(configfile)
+
+    print("Max_chunks updated successfully.")
+
+
 class App:
     def __init__(self, root_1):
+        self.config_window = None
+        self.format_var = tk.StringVar(value=get_result_format())
+        self.chunk_size_var = tk.IntVar(value=get_chunk_size())
+        self.threshold_var = tk.DoubleVar(value=get_threshold_value())
+        self.max_chunks_var = tk.IntVar(value=get_max_chunks())
         self.add_concept_window = None
         self.concept_description_entry = None
         self.concept_name_entry = None
@@ -262,6 +387,15 @@ class App:
         self.concept_window = None
         self.root = root_1
         self.root.title("LLM-Coder")
+
+        # Menu
+        self.menu = tk.Menu(self.root)
+        self.root.config(menu=self.menu)
+
+        # Configuration menu
+        config_menu = tk.Menu(self.menu, tearoff=0)
+        self.menu.add_cascade(label="Settings", menu=config_menu)
+        config_menu.add_command(label="Relevant context retrieval configuration", command=self.open_configuration)
 
         # Set the size of the window
         self.root.geometry("650x530")  # Width x Height
@@ -273,20 +407,15 @@ class App:
         # Mode selection
         self.mode = tk.StringVar(value="1")
         tk.Label(root, text="Select Mode:", bg=background_color).grid(row=0, column=0, padx=5, pady=(20, 5))
-        (tk.Radiobutton(root, text="Fully-automated deductive coding", variable=self.mode, value="1",
+        (tk.Radiobutton(root, text="Automated deductive coding", variable=self.mode, value="1",
                         bg=background_color, command=self.toggle_fields)
          .grid(row=0, column=1, pady=(20, 5), sticky="w"))
-        (tk.Radiobutton(root, text="Relevant context retrieval                                                      "
-                                   "      Threshold:", variable=self.mode, value="2", bg=background_color,
+        (tk.Radiobutton(root, text="Relevant context retrieval", variable=self.mode, value="2", bg=background_color,
                         command=self.toggle_fields)
          .grid(row=1, column=1, sticky="w"))
 
-        threshold = tk.DoubleVar(value=get_threshold_value())  # Variable to hold float value
-        self.threshold_entry = tk.Entry(root, textvariable=threshold, width=10)
-        self.threshold_entry.grid(row=1, column=2, padx=5, sticky="w")
-
         # Concept input dropdown
-        tk.Label(root, text="Topic:", bg=background_color).grid(row=2, column=0, padx=5, pady=(20, 5))
+        tk.Label(root, text="Concept:", bg=background_color).grid(row=2, column=0, padx=5, pady=(20, 5))
         self.concept_combobox = ttk.Combobox(root, values=list(read_concepts().keys()), state="readonly",
                                              width=47)  # Create a readonly combobox
         self.concept_combobox.grid(row=2, column=1, columnspan=1, padx=5, pady=(20, 5))
@@ -301,7 +430,7 @@ class App:
         self.system_message.grid(row=3, column=1, columnspan=1, padx=5, pady=(20, 5))
         self.system_message.insert(tk.END, get_system_message())
 
-        (tk.Label(root, text="Info:\nExplain the role of\nthe LLM", fg="red", bg=background_color)
+        (tk.Label(root, text="Info:\nDescribe the role of\nthe LLM", fg="red", bg=background_color)
          .grid(row=3, column=2, padx=5, pady=(20, 5)))
 
         # User message
@@ -310,7 +439,7 @@ class App:
         self.user_message.grid(row=4, column=1, columnspan=1, padx=5, pady=5)
         self.user_message.insert(tk.END, get_user_message())
 
-        (tk.Label(root, text="Info:\nExplain the task", fg="red", bg=background_color)
+        (tk.Label(root, text="Info:\nExplain the task and\ndescribe the codebook", fg="red", bg=background_color)
          .grid(row=4, column=2, padx=5, pady=(20, 5)))
 
         # Output format
@@ -348,11 +477,58 @@ class App:
             root.grid_columnconfigure(i, weight=1)
         self.toggle_fields()
 
+    def open_configuration(self):
+        self.config_window = tk.Toplevel(self.root)
+        self.config_window.title("Relevant Context Retrieval Settings")
+        self.config_window.geometry("540x230")
+
+        # Maximum number of chunks entry
+        (tk.Label(self.config_window, text="Maximum number of text chunks that can be retrieved:")
+         .grid(row=0, column=0, padx=10, pady=10, sticky="w"))
+        max_chunks_entry = tk.Entry(self.config_window, textvariable=self.max_chunks_var, width=10)
+        max_chunks_entry.grid(row=0, column=1, padx=10, pady=10)
+
+        (tk.Label(self.config_window, text="Maximum chunk size in tokens. One token is around 2/3 of a word:")
+         .grid(row=1, column=0, padx=10, pady=10, sticky="w"))
+        chunk_size_entry = tk.Entry(self.config_window, textvariable=self.chunk_size_var, width=10)
+        chunk_size_entry.grid(row=1, column=1, padx=10, pady=10)
+
+        # Threshold entry
+        (tk.Label(self.config_window, text="Minimal threshold for the similarity search algorithm [0,1]:")
+         .grid(row=2, column=0, padx=10, pady=10, sticky="w"))
+        threshold_entry = tk.Entry(self.config_window, textvariable=self.threshold_var, width=10)
+        threshold_entry.grid(row=2, column=1, padx=10, pady=10)
+
+        # Result format dropdown
+        tk.Label(self.config_window, text="Result format:").grid(row=3, column=0, padx=10, pady=10, sticky="w")
+        format_dropdown = ttk.Combobox(self.config_window, textvariable=self.format_var, values=["txt", "csv"],
+                                       state="readonly")
+        format_dropdown.grid(row=3, column=1, padx=10, pady=10)
+
+        # Save button
+        save_button = tk.Button(self.config_window, text="Save", command=self.save_configuration)
+        save_button.grid(row=6, column=0, columnspan=2, pady=20)
+
+    def save_configuration(self):
+        max_chunks = str(self.max_chunks_var.get())
+        chunk_size = str(self.chunk_size_var.get())
+        threshold = str(self.threshold_var.get())
+        result_format = self.format_var.get()
+
+        save_max_chunks(max_chunks)
+        save_chunk_size(chunk_size)
+        save_threshold(threshold)
+        save_result_format(result_format)
+
+        # Here you could save the values to a config file or use them directly
+        print(f"Max Chunks: {max_chunks}, Threshold: {threshold}")
+
+        self.config_window.destroy()
+
     def toggle_fields(self):
         is_mode_2 = self.mode.get() == "2"
 
         # Mode-specific toggling
-        self.threshold_entry.config(state="normal" if is_mode_2 else "disabled")
         self.concept_combobox.config(state="readonly" if is_mode_2 else "disabled")
         self.edit_button.config(state="normal" if is_mode_2 else "disabled")
         self.result_explanation_checkbox.config(state="disabled" if is_mode_2 else "normal")
@@ -374,10 +550,25 @@ class App:
                 field.config(state="normal", fg=enabled_fg, bg=enabled_bg)
 
     def browse_file(self):
-        file_path = filedialog.askopenfilename(filetypes=[("PDF files", "*.pdf")])
-        if file_path:
+        # Prompt the user to select files or a directory
+        file_paths = filedialog.askopenfilenames(filetypes=[("Text and PDF files", "*.txt *.pdf")])
+
+        if not file_paths:  # No files selected, maybe the user chose a directory
+            directory = filedialog.askdirectory()
+            if directory:  # If a directory is selected
+                # List all files in the directory with .txt and .pdf extensions
+                file_paths = [
+                    os.path.join(directory, f) for f in os.listdir(directory)
+                    if f.endswith('.txt') or f.endswith('.pdf')
+                ]
+
+        if file_paths:
+            # Convert the list of file paths to a string with each path separated by a comma
+            file_paths_str = ', '.join(file_paths)
+
+            # Clear the entry and insert the file paths
             self.file_path_entry.delete(0, tk.END)
-            self.file_path_entry.insert(0, file_path)
+            self.file_path_entry.insert(0, file_paths_str)
 
     def browse_save_path(self):
         save_path = filedialog.askdirectory()
@@ -398,21 +589,18 @@ class App:
         concept_input = self.concept_combobox.get().strip()
         tool_mode = self.mode.get()
         explanations = self.result_explanation_var.get()
-        threshold = self.threshold_entry.get()
+        threshold = self.threshold_var.get()
+        max_chunks = self.max_chunks_var.get()
+        result_format = self.format_var.get()
+        chunk_size = self.chunk_size_var.get()
 
         self.reset_fields()
-
-        # Validate inputs
-        if not file_path or not concept_input:
-            messagebox.showerror("Input Error", "Please provide both file path and concept.")
-            return
 
         # Run the main function
         try:
             messages = Messages(concept_input, system_message, user_message, output_format, explanations)
-            main(file_path, save_path, tool_mode, messages, threshold)
+            main(file_path, save_path, tool_mode, messages, threshold, max_chunks, result_format, chunk_size)
             save_new_messages(system_message, user_message, output_format)
-            save_threshold(threshold)
             messagebox.showinfo("Success", "Process completed successfully!")
         except Exception as e:
             messagebox.showerror("Error", f"An error occurred: {e}")
@@ -497,7 +685,7 @@ class App:
                                                                                          columnspan=2,
                                                                                          padx=10,
                                                                                          pady=10)
-     
+
     def submit_concept(self):
         """Submit the concept if both fields are filled out."""
         concept_name = self.concept_name_entry.get().strip()
