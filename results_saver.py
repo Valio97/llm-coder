@@ -34,6 +34,7 @@ class ResultsSaver:
 
     @staticmethod
     def save_results_relevant_chunks_in_txt_file(messages, file_path, results_with_scores, save_path, timestamp):
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"{messages.concept.replace(' ', '_')}_relevant_context_{timestamp}.txt"
 
         full_file_path = os.path.join(save_path, filename)
