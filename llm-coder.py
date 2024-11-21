@@ -57,7 +57,7 @@ def fully_automated_coding(messages, files_array, save_path, threshold, max_chun
         # Count the number of tokens
         token_count = len(tokens)
 
-        if token_count > 20000:
+        if token_count > 10000:
             embeddings = OpenAIEmbeddings()
             text_chunks = FileUtils.split_text(raw_text, chunk_size)
             vector_store = FAISS.from_texts(text_chunks, embeddings)
@@ -296,14 +296,6 @@ class App:
 
     def browse_file(self):
         file_paths = filedialog.askopenfilenames(filetypes=[("Text and PDF files", "*.txt *.pdf")])
-
-        if not file_paths:
-            directory = filedialog.askdirectory()
-            if directory:
-                file_paths = [
-                    os.path.join(directory, f) for f in os.listdir(directory)
-                    if f.endswith('.txt') or f.endswith('.pdf')
-                ]
 
         if file_paths:
             file_paths_str = ', '.join(file_paths)
