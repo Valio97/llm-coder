@@ -33,15 +33,15 @@ class ResultsSaver:
         print(f"Results saved to {full_file_path}")
 
     @staticmethod
-    def save_results_relevant_chunks_in_txt_file(messages, file_path, results_with_scores, save_path, timestamp):
+    def save_results_relevant_chunks_in_txt_file(concept, file_path, results_with_scores, save_path, timestamp):
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"{messages.concept.replace(' ', '_')}_relevant_context_{timestamp}.txt"
+        filename = f"{concept.replace(' ', '_')}_relevant_context_{timestamp}.txt"
 
         full_file_path = os.path.join(save_path, filename)
 
         # Write the results to a new file
         with open(full_file_path, 'a') as file:
-            file.write(f"Relevant Context for Concept: {messages.concept}\n")
+            file.write(f"Relevant Context for Concept: {concept}\n")
             file.write("=" * 50 + "\n")
 
             if results_with_scores:
@@ -53,9 +53,9 @@ class ResultsSaver:
                 file.write("No relevant documents found above the similarity threshold.\n")
 
     @staticmethod
-    def save_results_relevant_chunks_in_csv_file(messages, file_path, results_with_scores, save_path, timestamp):
+    def save_results_relevant_chunks_in_csv_file(concept, file_path, results_with_scores, save_path, timestamp):
         # Define the CSV file name and full path
-        filename = f"{messages.concept.replace(' ', '_')}_relevant_context_{timestamp}.csv"
+        filename = f"{concept.replace(' ', '_')}_relevant_context_{timestamp}.csv"
         full_file_path = os.path.join(save_path, filename)
 
         # Open the CSV file in append mode to add rows if the file already exists

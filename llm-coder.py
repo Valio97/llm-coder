@@ -1,6 +1,5 @@
 import os
 import tkinter as tk
-import re
 import tiktoken
 from datetime import datetime
 from tkinter import filedialog, messagebox
@@ -13,7 +12,9 @@ from langchain_openai import OpenAIEmbeddings
 from configuration_option import ConfigurationOption
 from configuration_section import ConfigurationSection
 from file_utils import FileUtils
-from messages import Messages
+from prompt_components import PromptComponents
+from context_retrieval_config import ContextRetrievalConfig
+from tool_config import ToolConfig
 from results_saver import ResultsSaver
 from configuration import Configuration
 
@@ -22,26 +23,25 @@ api_key = os.getenv('OPENAI_API_KEY')
 background_color = "#dff5e0"
 
 
-def main(file_path, save_path, tool_mode, messages, threshold, max_chunks, result_format, chunk_size):
+def main(tool_config):
     if not api_key:
         print("OPENAI_API_KEY environment variable is not set.")
         return
 
-    files_array = file_path.split(", ")
-
-    if tool_mode == '1':
-        fully_automated_coding(messages, files_array, save_path, threshold, max_chunks, chunk_size)
+    if tool_config.tool_mode == '1':
+        fully_automated_coding(tool_config)
     else:
-        relevant_context_retrieval(messages, files_array, save_path, threshold, max_chunks, result_format, chunk_size)
+        relevant_context_retrieval(tool_config)
 
 
-def fully_automated_coding(messages, files_array, save_path, threshold, max_chunks, chunk_size):
+def fully_automated_coding(tool_config):
     # Prepare the LLM and the Q&A chain
     llm = ChatOpenAI(temperature=0.0, model_name="gpt-4o")
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    for single_file in files_array:
-        prompt = construct_prompt(messages)
+    for single_file in tool_config.files_array:
+        prompt = construct_prompt(tool_config.messages)
+        context_config = tool_config.context_retrieval_config
         raw_text = ''
         if single_file.endswith('.txt'):
             with open(single_file, "r", encoding='utf-8', errors='replace') as file:
@@ -59,12 +59,12 @@ def fully_automated_coding(messages, files_array, save_path, threshold, max_chun
 
         if token_count > 10000:
             embeddings = OpenAIEmbeddings()
-            text_chunks = FileUtils.split_text(raw_text, chunk_size)
+            text_chunks = FileUtils.split_text(raw_text, context_config.chunk_size)
             vector_store = FAISS.from_texts(text_chunks, embeddings)
-            threshold_value = float(threshold)
+            threshold_value = float(context_config.threshold)
             results_with_scores = vector_store.similarity_search_with_relevance_scores(
                 prompt,
-                k=max_chunks,
+                k=context_config.max_chunks,
                 threshold=threshold_value)
             filtered_results = [doc for doc, score in results_with_scores if score >= threshold_value]
 
@@ -79,36 +79,43 @@ def fully_automated_coding(messages, files_array, save_path, threshold, max_chun
 
             response = llm.invoke(prompt)
 
-        result_saver = ResultsSaver(single_file, save_path, response.content, messages.concept)
+        result_saver = ResultsSaver(single_file, tool_config.save_path, response.content,
+                                    tool_config.concept_input)
         result_saver.save_results_fully_automated(timestamp)
 
 
-def relevant_context_retrieval(messages, files_array, save_path, threshold, max_chunks, result_format, chunk_size):
+def relevant_context_retrieval(tool_config):
+    context_config = tool_config.context_retrieval_config
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     embeddings = OpenAIEmbeddings()
-    threshold_value = float(threshold)
+    threshold_value = float(context_config.threshold)
+    messages = tool_config.messages
+    result_format = context_config.result_format
+    concept = tool_config.concept_input
 
-    for single_file in files_array:
+    for single_file in tool_config.files_array:
         raw_text = ''
         if single_file.endswith('.txt'):
             with open(single_file, "r", encoding='utf-8', errors='replace') as file:
                 raw_text = file.read()
         elif single_file.endswith('.pdf'):
             raw_text = FileUtils.extract_text_from_pdf_file(single_file)
-        text_chunks = FileUtils.split_text(raw_text, chunk_size)
+        text_chunks = FileUtils.split_text(raw_text, context_config.chunk_size)
         print(text_chunks.__sizeof__())
         vector_store = FAISS.from_texts(text_chunks, embeddings)
         results_with_scores = vector_store.similarity_search_with_relevance_scores(
-            Configuration.get_concept_description(messages.concept),
-            k=max_chunks,
+            Configuration.get_concept_description(tool_config.concept_input),
+            k=context_config.max_chunks,
             threshold=threshold_value)
         filtered_results = [(doc, score) for doc, score in results_with_scores if score >= threshold_value]
 
         if result_format == "txt":
-            ResultsSaver.save_results_relevant_chunks_in_txt_file(messages, single_file, filtered_results, save_path,
+            ResultsSaver.save_results_relevant_chunks_in_txt_file(concept, single_file, filtered_results,
+                                                                  tool_config.save_path,
                                                                   timestamp)
         elif result_format == "csv":
-            ResultsSaver.save_results_relevant_chunks_in_csv_file(messages, single_file, filtered_results, save_path,
+            ResultsSaver.save_results_relevant_chunks_in_csv_file(concept, single_file, filtered_results,
+                                                                  tool_config.save_path,
                                                                   timestamp)
 
 
@@ -329,8 +336,12 @@ class App:
         self.reset_fields()
 
         try:
-            messages = Messages(concept_input, system_message, user_message, output_format)
-            main(file_path, save_path, tool_mode, messages, threshold, max_chunks, result_format, chunk_size)
+            files_array = file_path.split(", ")
+            prompt_components = PromptComponents(system_message, user_message, output_format)
+            context_retrieval_config = ContextRetrievalConfig(chunk_size, max_chunks, threshold, result_format)
+            tool_config = ToolConfig(tool_mode, prompt_components, concept_input, files_array,
+                                     save_path, context_retrieval_config)
+            main(tool_config)
             Configuration.update_whole_prompt(system_message, user_message, output_format)
             messagebox.showinfo("Success", "Process completed successfully!")
         except Exception as e:
